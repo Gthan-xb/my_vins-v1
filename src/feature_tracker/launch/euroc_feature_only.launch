@@ -1,0 +1,18 @@
+<launch>
+    <node pkg="feature_tracker"
+          type="feature_tracker"
+          name="feature_tracker"
+          output="screen">
+
+        <!-- 配置文件路径 -->
+        <param name="config_file"
+               type="string"
+               value="$(find feature_tracker)/../config/euroc/euroc_config.yaml" />
+
+        <!-- 直接设置 vins_folder ROS 参数 -->
+        <param name="vins_folder"
+               type="string"
+               value="/home/ethan/vins_mono_learning/machine_hall" />
+
+    </node>
+</launch>

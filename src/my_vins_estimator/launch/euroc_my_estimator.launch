@@ -1,0 +1,17 @@
+<launch>
+    <!-- 是否输出到屏幕 -->
+    <arg name="output" default="screen" />
+
+    <!-- 参数文件 -->
+    <arg name="config_file" default="$(find my_vins_estimator)/config/euroc_my_estimator.yaml" />
+
+    <!-- 加载参数到 my_vins_estimator 节点私有命名空间 -->
+    <node pkg="my_vins_estimator"
+          type="my_vins_estimator_node"
+          name="my_vins_estimator"
+          output="$(arg output)">
+
+        <rosparam file="$(arg config_file)" command="load" />
+
+    </node>
+</launch>
