@@ -26,7 +26,11 @@ extern Eigen::Matrix3d RIC[1];
 
 extern std::string IMU_TOPIC;
 extern double TD;
+extern int ESTIMATE_TD;
 extern int ROLLING_SHUTTER;
+extern double TR;
+extern double ROW;
+extern double COL;
 void readParameters(ros::NodeHandle& n);
 
 enum SIZE_PARAMETERIZATION

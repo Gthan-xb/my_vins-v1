@@ -12,7 +12,7 @@
 #include "my_vins_estimator/solve_5pts.h"
 #include "my_vins_estimator/initial_sfm.h"
 #include "my_vins_estimator/marginalization_factor.h"
-
+#include "my_vins_estimator/projection_td_factor.h"
 // #include "my_vins_estimator/imu_factor.h"
 // #include "my_vins_estimator/projection_factor.h"
 // #include "my_vins_estimator/pose_local_parameterization.h"
@@ -132,6 +132,7 @@ public:
     double para_SpeedBias[WINDOW_SIZE + 1][SIZE_SPEEDBIAS];
     double para_Feature[NUM_OF_F][SIZE_FEATURE];
     double para_Ex_Pose[NUM_OF_CAM][SIZE_POSE];
+    double para_Td[1][1];
     
     MarginalizationInfo *last_marginalization_info;
     std::vector<double *> last_marginalization_parameter_blocks;

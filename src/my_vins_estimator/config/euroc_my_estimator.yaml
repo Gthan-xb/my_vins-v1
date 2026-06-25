@@ -57,7 +57,16 @@ init_depth: 5.0
 
 # =========================
 # Time offset
-# 第一版不估计 td，只读取固定值
+# 第二版估计 td
 # =========================
 
 td: 0.0
+
+estimate_td: 0
+
+rolling_shutter: 0
+rolling_shutter_tr: 0.0
+
+image_height: 480
+image_width: 752
+

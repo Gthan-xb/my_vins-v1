@@ -20,6 +20,11 @@ Eigen::Matrix3d RIC[NUM_OF_CAM];
 
 std::string IMU_TOPIC;
 double TD;
+int ESTIMATE_TD;
+int ROLLING_SHUTTER;
+double TR;
+double ROW;
+double COL;
 
 void readParameters(ros::NodeHandle& n)
 {
@@ -39,7 +44,19 @@ void readParameters(ros::NodeHandle& n)
     n.param("imu_topic", IMU_TOPIC, std::string("/imu0"));
 
     n.param("td", TD, 0.0);
+    n.param("estimate_td", ESTIMATE_TD, 0);
 
+    n.param("rolling_shutter", ROLLING_SHUTTER, 0);
+    n.param("rolling_shutter_tr", TR, 0.0);
+
+    n.param("image_height", ROW, 480.0);
+    n.param("image_width", COL, 752.0);
+
+    ROS_INFO("td initial value: %.6f, estimate_td: %d", TD, ESTIMATE_TD);
+    ROS_INFO("image size: ROW = %.0f, COL = %.0f, rolling shutter = %d, TR = %.6f",
+            ROW, COL, ROLLING_SHUTTER, TR);
+  
+    
     std::vector<double> g_vec;
     if (n.getParam("gravity", g_vec) && g_vec.size() == 3)
     {

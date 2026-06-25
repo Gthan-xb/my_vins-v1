@@ -36,6 +36,8 @@ void Estimator::setParameter()
     ProjectionFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     
     td = TD;
+    para_Td[0][0] = TD;
+    ProjectionTdFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Eigen::Matrix2d::Identity();
     g = G;
 }
 
@@ -95,6 +97,7 @@ void Estimator::clearState()
     g=G;
     
     td = TD;
+    para_Td[0][0] = TD;
 
     f_manager.clearState();
 
@@ -200,7 +203,8 @@ void Estimator::processImage(const std::map<int, std::vector<std::pair<int, Eige
         marginalization_flag = MARGIN_SECOND_NEW;
         ROS_INFO("current frame is treated as non-keyframe");
     }
-
+    
+ 
     /*
      * 2. 保存当前图像帧 Header
      */
@@ -384,6 +388,8 @@ void Estimator::vector2double()
     {
         para_Feature[i][0] = dep(i);
     }
+
+    para_Td[0][0] = td;
 } 
 
 
@@ -449,6 +455,18 @@ void Estimator::double2vector()
     }
 
     f_manager.setDepth(dep);
+
+    if (ESTIMATE_TD)
+    {
+        td = para_Td[0][0];
+    }
+
+    if (!std::isfinite(td) || std::abs(td) > 0.1)
+    {
+        ROS_WARN("td is invalid: %.6f, reset to initial TD = %.6f",
+                td, TD);
+        td = TD;
+    }
 }
 
 
@@ -482,8 +500,25 @@ void Estimator::optimization()
      */
 
      vector2double();
-    
+
      ceres::Problem problem;
+     problem.AddParameterBlock(para_Td[0], 1);
+
+     if (!ESTIMATE_TD)
+    {
+        problem.SetParameterBlockConstant(para_Td[0]);
+    }
+    else
+    {
+        /*
+        * 调试阶段建议限制 td 范围，避免它吸收其他模型误差。
+        * 单位：秒。
+        */
+        problem.SetParameterLowerBound(para_Td[0], 0, -0.03);
+        problem.SetParameterUpperBound(para_Td[0], 0,  0.03);
+    }
+    ROS_INFO("td before optimization = %.6f, estimate_td = %d",
+         para_Td[0][0], ESTIMATE_TD);
 
      ceres::LossFunction *loss_function = new ceres::CauchyLoss(1.0);
 
@@ -616,7 +651,7 @@ void Estimator::optimization()
         int imu_i = it_per_id.start_frame;
         int imu_j = imu_i - 1;
 
-        Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+        // Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].point;
 
         for (auto &it_per_frame : it_per_id.feature_per_frame)
         {
@@ -633,17 +668,49 @@ void Estimator::optimization()
                 continue;
             }
 
-            Eigen::Vector3d pts_j = it_per_frame.point;
+            // Eigen::Vector3d pts_j = it_per_frame.point;
 
-            ProjectionFactor *projection_factor = new ProjectionFactor(pts_i, pts_j);
+            FeaturePerFrame &feature_per_frame_i =it_per_id.feature_per_frame[0];
 
-            problem.AddResidualBlock(
-                projection_factor,
-                loss_function,
-                para_Pose[imu_i],
-                para_Pose[imu_j],
-                para_Ex_Pose[0],
-                para_Feature[feature_index]);
+            FeaturePerFrame &feature_per_frame_j = it_per_frame;
+
+            if (ESTIMATE_TD)
+            {
+                ProjectionTdFactor *projection_td_factor =
+                    new ProjectionTdFactor(
+                        feature_per_frame_i.point,
+                        feature_per_frame_j.point,
+                        feature_per_frame_i.velocity,
+                        feature_per_frame_j.velocity,
+                        feature_per_frame_i.cur_td,
+                        feature_per_frame_j.cur_td,
+                        feature_per_frame_i.uv.y(),
+                        feature_per_frame_j.uv.y());
+
+                problem.AddResidualBlock(
+                    projection_td_factor,
+                    loss_function,
+                    para_Pose[imu_i],
+                    para_Pose[imu_j],
+                    para_Ex_Pose[0],
+                    para_Feature[feature_index],
+                    para_Td[0]);
+            }
+            else
+            {
+                ProjectionFactor *projection_factor =
+                    new ProjectionFactor(
+                        feature_per_frame_i.point,
+                        feature_per_frame_j.point);
+
+                problem.AddResidualBlock(
+                    projection_factor,
+                    loss_function,
+                    para_Pose[imu_i],
+                    para_Pose[imu_j],
+                    para_Ex_Pose[0],
+                    para_Feature[feature_index]);
+            }
 
             visual_factor_count++;
         }
@@ -689,6 +756,22 @@ void Estimator::optimization()
      */
     double2vector();
 
+    if (ESTIMATE_TD)
+    {
+        td = para_Td[0][0];
+
+        if (!std::isfinite(td) || std::abs(td) > 0.03)
+        {
+            ROS_WARN("invalid optimized td = %.6f, reset to TD = %.6f",
+                    td, TD);
+
+            td = TD;
+        }
+    }
+
+    ROS_INFO("td after optimization = %.6f", td);
+
+
     std::unordered_map<long, double *> addr_shift;
 
     for (int i = 1; i <= WINDOW_SIZE; i++)
@@ -703,6 +786,9 @@ void Estimator::optimization()
     addr_shift[reinterpret_cast<long>(para_Ex_Pose[0])] =
         para_Ex_Pose[0];
 
+    addr_shift[reinterpret_cast<long>(para_Td[0])] =
+         para_Td[0];
+    
     for (int i = 0; i < NUM_OF_F; i++)
     {
         addr_shift[reinterpret_cast<long>(para_Feature[i])] =
@@ -832,8 +918,8 @@ void Estimator::optimization()
             int imu_j =
                 imu_i - 1;
 
-            Eigen::Vector3d pts_i =
-                it_per_id.feature_per_frame[0].point;
+            // Eigen::Vector3d pts_i =
+            //     it_per_id.feature_per_frame[0].point;
 
             for (auto &it_per_frame : it_per_id.feature_per_frame)
             {
@@ -849,11 +935,10 @@ void Estimator::optimization()
                     continue;
                 }
 
-                Eigen::Vector3d pts_j =
-                    it_per_frame.point;
+                // Eigen::Vector3d pts_j =
+                //     it_per_frame.point;
 
-                ProjectionFactor *projection_factor =
-                    new ProjectionFactor(pts_i, pts_j);
+               
 
                 /*
                 * 参数块顺序：
@@ -866,17 +951,61 @@ void Estimator::optimization()
                 *   pose0
                 *   feature inverse depth
                 */
-                ResidualBlockInfo *residual_block_info =
-                    new ResidualBlockInfo(
-                        projection_factor,
-                        new ceres::HuberLoss(1.0),
-                        std::vector<double *>{para_Pose[imu_i],
-                                            para_Pose[imu_j],
-                                            para_Ex_Pose[0],
-                                            para_Feature[feature_index]},
-                        std::vector<int>{0, 3});
+                FeaturePerFrame &feature_per_frame_i =
+                    it_per_id.feature_per_frame[0];
 
-                marginalization_info->addResidualBlockInfo(residual_block_info);
+                FeaturePerFrame &feature_per_frame_j =
+                    it_per_frame;
+
+                if (ESTIMATE_TD)
+                {
+                    ProjectionTdFactor *projection_td_factor =
+                        new ProjectionTdFactor(
+                            feature_per_frame_i.point,
+                            feature_per_frame_j.point,
+                            feature_per_frame_i.velocity,
+                            feature_per_frame_j.velocity,
+                            feature_per_frame_i.cur_td,
+                            feature_per_frame_j.cur_td,
+                            feature_per_frame_i.uv.y(),
+                            feature_per_frame_j.uv.y());
+
+                    ResidualBlockInfo *residual_block_info =
+                        new ResidualBlockInfo(
+                            projection_td_factor,
+                            new ceres::HuberLoss(1.0),
+                            std::vector<double *>{
+                                para_Pose[imu_i],
+                                para_Pose[imu_j],
+                                para_Ex_Pose[0],
+                                para_Feature[feature_index],
+                                para_Td[0]},
+                            std::vector<int>{0, 3});
+
+                    marginalization_info->addResidualBlockInfo(
+                        residual_block_info);
+                }
+                else
+                {
+                    ProjectionFactor *projection_factor =
+                        new ProjectionFactor(
+                            feature_per_frame_i.point,
+                            feature_per_frame_j.point);
+
+                    ResidualBlockInfo *residual_block_info =
+                        new ResidualBlockInfo(
+                            projection_factor,
+                            new ceres::HuberLoss(1.0),
+                            std::vector<double *>{
+                                para_Pose[imu_i],
+                                para_Pose[imu_j],
+                                para_Ex_Pose[0],
+                                para_Feature[feature_index]},
+                            std::vector<int>{0, 3});
+
+                    marginalization_info->addResidualBlockInfo(
+                        residual_block_info);
+                }
 
                 margin_visual_factor_num++;
             }
@@ -993,6 +1122,9 @@ void Estimator::optimization()
                 addr_shift_second_new[
                     reinterpret_cast<long>(para_Ex_Pose[0])] =
                     para_Ex_Pose[0];
+                addr_shift_second_new[
+                    reinterpret_cast<long>(para_Td[0])] =
+                    para_Td[0];
 
                 for (int i = 0; i < NUM_OF_F; i++)
                 {
@@ -1036,16 +1168,31 @@ void Estimator::optimization()
     
 
     
-    ROS_INFO("after optimization: P[%d] = %.3f %.3f %.3f, V = %.3f %.3f %.3f, Ba norm = %.4f, Bg norm = %.4f",
-         WINDOW_SIZE,
+    // ROS_INFO("after optimization: P[%d] = %.3f %.3f %.3f, V = %.3f %.3f %.3f, Ba norm = %.4f, Bg norm = %.4f",
+    //      WINDOW_SIZE,`
+    //      Ps[WINDOW_SIZE].x(),
+    //      Ps[WINDOW_SIZE].y(),
+    //      Ps[WINDOW_SIZE].z(),
+    //      Vs[WINDOW_SIZE].x(),
+    //      Vs[WINDOW_SIZE].y(),
+    //      Vs[WINDOW_SIZE].z(),
+    //      Bas[WINDOW_SIZE].norm(),
+    //      Bgs[WINDOW_SIZE].norm());
+    ROS_INFO("state: t=%.3f, flag=%d, P=%.3f %.3f %.3f, V=%.3f %.3f %.3f, Ba=%.4f %.4f %.4f, Bg=%.4f %.4f %.4f",
+         Headers[WINDOW_SIZE].stamp.toSec(),
+         marginalization_flag,
          Ps[WINDOW_SIZE].x(),
          Ps[WINDOW_SIZE].y(),
          Ps[WINDOW_SIZE].z(),
          Vs[WINDOW_SIZE].x(),
          Vs[WINDOW_SIZE].y(),
          Vs[WINDOW_SIZE].z(),
-         Bas[WINDOW_SIZE].norm(),
-         Bgs[WINDOW_SIZE].norm());
+         Bas[WINDOW_SIZE].x(),
+         Bas[WINDOW_SIZE].y(),
+         Bas[WINDOW_SIZE].z(),
+         Bgs[WINDOW_SIZE].x(),
+         Bgs[WINDOW_SIZE].y(),
+         Bgs[WINDOW_SIZE].z());
 
 }
 

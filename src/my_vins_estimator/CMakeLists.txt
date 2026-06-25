@@ -146,6 +146,7 @@ add_executable(my_vins_estimator_node
   src/initial_sfm.cpp
   src/initial_alignment.cpp
   src/marginalization_factor.cpp
+  src/projection_td_factor.cpp
   )
 
 target_link_libraries(my_vins_estimator_node
