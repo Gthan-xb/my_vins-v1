@@ -44,7 +44,7 @@ void pubOdometry(const std_msgs::Header &header)
     nav_msgs::Odometry odom;
 
     odom.header = header;
-    odom.header.frame_id = "map";
+    odom.header.frame_id = "world";
     odom.child_frame_id = "body";
 
     int index = estimator.frame_count;
@@ -73,7 +73,7 @@ void pubOdometry(const std_msgs::Header &header)
     pose_stamped.pose = odom.pose.pose;
 
     path.header = odom.header;
-    path.header.frame_id = "map";
+    path.header.frame_id = "world";
     path.poses.push_back(pose_stamped);
 
     pub_path.publish(path);

@@ -51,6 +51,11 @@ void Estimator::clearState()
         Vs[i].setZero();
         Bas[i].setZero();
         Bgs[i].setZero();
+        
+        dbg_last_post_opt_P.setZero();
+        dbg_last_post_opt_V.setZero();
+        dbg_last_post_opt_ypr.setZero();
+        dbg_has_last_post_opt = false;
 
         dt_buf[i].clear();
         linear_acceleration_buf[i].clear();
@@ -167,8 +172,9 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration , cons
     Rs[j] = Rs[j] * Utility::deltaQ(un_gyr * dt).toRotationMatrix();
     Vector3d un_acc_1 = Rs[j] *(linear_acceleration - Bas[j]) - g;
     Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
-    Vs[j] = Vs[j] + un_acc * dt;
     Ps[j] = Ps[j] + Vs[j] * dt + 0.5 * un_acc * dt * dt;
+    Vs[j] = Vs[j] + un_acc * dt;
+    
     }
     acc_0 = linear_acceleration;
     gyr_0 = angular_velocity;
@@ -298,9 +304,61 @@ void Estimator::processImage(const std::map<int, std::vector<std::pair<int, Eige
          * 已经初始化完成，正常 VIO 非线性优化阶段。
          */
         ROS_INFO("solver_flag == NON_LINEAR, solve odometry");
+       
+        Eigen::Vector3d pre_opt_P = Ps[WINDOW_SIZE];
+        Eigen::Vector3d pre_opt_V = Vs[WINDOW_SIZE];
+        Eigen::Vector3d pre_opt_ypr = Utility::R2ypr(Rs[WINDOW_SIZE]);
+
+        if (dbg_has_last_post_opt)
+        {
+            ROS_INFO(
+                "[DBG_PRED_DELTA] t=%.3f "
+                "dP=[%.6f %.6f %.6f] "
+                "dV=[%.6f %.6f %.6f] "
+                "dYPR=[%.6f %.6f %.6f]",
+                Headers[WINDOW_SIZE].stamp.toSec(),
+                pre_opt_P.x() - dbg_last_post_opt_P.x(),
+                pre_opt_P.y() - dbg_last_post_opt_P.y(),
+                pre_opt_P.z() - dbg_last_post_opt_P.z(),
+                pre_opt_V.x() - dbg_last_post_opt_V.x(),
+                pre_opt_V.y() - dbg_last_post_opt_V.y(),
+                pre_opt_V.z() - dbg_last_post_opt_V.z(),
+                pre_opt_ypr.x() - dbg_last_post_opt_ypr.x(),
+                pre_opt_ypr.y() - dbg_last_post_opt_ypr.y(),
+                pre_opt_ypr.z() - dbg_last_post_opt_ypr.z());
+        }
+
+        logWindowState("DBG_PRE_OPT");
 
         solveOdometry();
         
+        Eigen::Vector3d post_opt_P = Ps[WINDOW_SIZE];
+        Eigen::Vector3d post_opt_V = Vs[WINDOW_SIZE];
+        Eigen::Vector3d post_opt_ypr = Utility::R2ypr(Rs[WINDOW_SIZE]);
+
+        ROS_INFO(
+            "[DBG_OPT_DELTA] t=%.3f "
+            "dP=[%.6f %.6f %.6f] "
+            "dV=[%.6f %.6f %.6f] "
+            "dYPR=[%.6f %.6f %.6f]",
+            Headers[WINDOW_SIZE].stamp.toSec(),
+            post_opt_P.x() - pre_opt_P.x(),
+            post_opt_P.y() - pre_opt_P.y(),
+            post_opt_P.z() - pre_opt_P.z(),
+            post_opt_V.x() - pre_opt_V.x(),
+            post_opt_V.y() - pre_opt_V.y(),
+            post_opt_V.z() - pre_opt_V.z(),
+            post_opt_ypr.x() - pre_opt_ypr.x(),
+            post_opt_ypr.y() - pre_opt_ypr.y(),
+            post_opt_ypr.z() - pre_opt_ypr.z());
+
+        dbg_last_post_opt_P = post_opt_P;
+        dbg_last_post_opt_V = post_opt_V;
+        dbg_last_post_opt_ypr = post_opt_ypr;
+        dbg_has_last_post_opt = true;
+
+        logWindowState("DBG_POST_OPT");
+
         if (failureDetection())
         {
             ROS_WARN("estimator failure detected, reset system");
@@ -314,6 +372,8 @@ void Estimator::processImage(const std::map<int, std::vector<std::pair<int, Eige
         last_P = Ps[WINDOW_SIZE];
 
         slideWindow();
+        
+        logWindowState("DBG_POST_SLIDE");
 
         ROS_INFO("nonlinear optimization and slideWindow executed");
             
@@ -502,6 +562,40 @@ void Estimator::optimization()
      vector2double();
 
      ceres::Problem problem;
+
+        struct DebugResidualBlock
+        {
+            ceres::CostFunction *cost;
+            std::vector<double *> params;
+        };
+
+        struct DebugVisualResidualBlock
+        {
+            ceres::CostFunction *cost;
+            std::vector<double *> params;
+
+            int feature_id;
+            int start_frame;
+            int used_num;
+            int imu_i;
+            int imu_j;
+            double depth;
+
+            double first_depth;
+            int triangulate_count;
+
+            Eigen::Vector3d point_i;
+            Eigen::Vector3d point_j;
+
+            Eigen::Vector2d velocity_i;
+            Eigen::Vector2d velocity_j;
+        };
+
+
+        std::vector<DebugResidualBlock> dbg_imu_blocks;
+        std::vector<DebugVisualResidualBlock> dbg_visual_blocks;
+        std::vector<DebugResidualBlock> dbg_prior_blocks;
+
      problem.AddParameterBlock(para_Td[0], 1);
 
      if (!ESTIMATE_TD)
@@ -541,8 +635,11 @@ void Estimator::optimization()
      * 原版完整系统依靠初始化、边缘化先验和 yaw 对齐处理 gauge。
      * 我们第一版没有边缘化，所以先固定 para_Pose[0]。
      */
-     problem.SetParameterBlockConstant(para_Pose[0]);
 
+     
+        
+    problem.SetParameterBlockConstant(para_Pose[0]);
+     
       /*
      * 5. 添加外参参数块，并固定外参
      *
@@ -570,11 +667,16 @@ void Estimator::optimization()
             marginalization_factor,
             nullptr,
             last_marginalization_parameter_blocks);
+        
+        dbg_prior_blocks.push_back(
+            {marginalization_factor, last_marginalization_parameter_blocks});
 
         ROS_INFO("add last marginalization prior, residual size = %d, parameter block num = %lu",
                  last_marginalization_info->n,
                  last_marginalization_parameter_blocks.size());
     }
+
+    
 
     /*
      * 7. 添加 IMUFactor
@@ -600,7 +702,16 @@ void Estimator::optimization()
 
         IMUFactor *imu_factor = new IMUFactor(pre_integrations[j]);
 
-        problem.AddResidualBlock( imu_factor, nullptr, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
+        std::vector<double *> imu_params{
+            para_Pose[i],
+            para_SpeedBias[i],
+            para_Pose[j],
+            para_SpeedBias[j]
+        };
+
+        problem.AddResidualBlock( imu_factor, nullptr, imu_params);
+        
+        dbg_imu_blocks.push_back({imu_factor, imu_params});
 
         imu_factor_count++;
     }
@@ -703,13 +814,38 @@ void Estimator::optimization()
                         feature_per_frame_i.point,
                         feature_per_frame_j.point);
 
-                problem.AddResidualBlock(
-                    projection_factor,
-                    loss_function,
+                std::vector<double *> visual_params{
                     para_Pose[imu_i],
                     para_Pose[imu_j],
                     para_Ex_Pose[0],
-                    para_Feature[feature_index]);
+                    para_Feature[feature_index]
+                };
+
+
+                problem.AddResidualBlock(
+                    projection_factor,
+                    loss_function,
+                    visual_params);
+                
+               dbg_visual_blocks.push_back(
+                    {
+                        projection_factor,
+                        visual_params,
+                        it_per_id.feature_id,
+                        it_per_id.start_frame,
+                        it_per_id.used_num,
+                        imu_i,
+                        imu_j,
+                        it_per_id.estimated_depth,
+                        it_per_id.dbg_first_depth,
+                        it_per_id.dbg_triangulate_count,
+                        feature_per_frame_i.point,
+                        feature_per_frame_j.point,
+
+                        feature_per_frame_i.velocity,
+                        feature_per_frame_j.velocity
+                    });
+
             }
 
             visual_factor_count++;
@@ -743,10 +879,452 @@ void Estimator::optimization()
     options.max_num_iterations = NUM_ITERATIONS;
     options.max_solver_time_in_seconds = SOLVER_TIME;
     options.minimizer_progress_to_stdout = false;
+    
+    auto computeResidualRms =
+    [](const auto &blocks,
+       double &rms,
+       int &block_num,
+       int &residual_dim)
+    {
+        double squared_sum = 0.0;
+        block_num = 0;
+        residual_dim = 0;
+
+        for (const auto &block : blocks)
+        {
+            const int n = block.cost->num_residuals();
+
+            std::vector<double> residual(n, 0.0);
+
+            std::vector<const double *> const_params;
+            const_params.reserve(block.params.size());
+
+            for (double *p : block.params)
+            {
+                const_params.push_back(p);
+            }
+
+            bool ok = block.cost->Evaluate(
+                const_params.data(),
+                residual.data(),
+                nullptr);
+
+            if (!ok)
+                continue;
+
+            for (double r : residual)
+            {
+                if (std::isfinite(r))
+                    squared_sum += r * r;
+            }
+
+            block_num++;
+            residual_dim += n;
+        }
+
+        rms = residual_dim > 0
+            ? std::sqrt(squared_sum / residual_dim)
+            : -1.0;
+    };
+
+    auto logWorstVisualResiduals =
+        [&](const char *tag,
+            const std::vector<DebugVisualResidualBlock> &blocks)
+    {
+        struct VisualResidualItem
+        {
+            double norm;
+            int feature_id;
+            int start_frame;
+            int used_num;
+            int imu_i;
+            int imu_j;
+            double depth;
+        };
+
+        std::vector<VisualResidualItem> items;
+        items.reserve(blocks.size());
+
+        int invalid_num = 0;
+
+        for (const auto &block : blocks)
+        {
+            const int n = block.cost->num_residuals();
+            std::vector<double> residual(n, 0.0);
+
+            std::vector<const double *> const_params;
+            const_params.reserve(block.params.size());
+
+            for (double *p : block.params)
+            {
+                const_params.push_back(p);
+            }
+
+            bool ok = block.cost->Evaluate(
+                const_params.data(),
+                residual.data(),
+                nullptr);
+
+            if (!ok)
+            {
+                invalid_num++;
+                continue;
+            }
+
+            double squared_norm = 0.0;
+            bool finite = true;
+
+            for (double r : residual)
+            {
+                if (!std::isfinite(r))
+                {
+                    finite = false;
+                    break;
+                }
+
+                squared_norm += r * r;
+            }
+
+            if (!finite)
+            {
+                invalid_num++;
+                continue;
+            }
+            
+            const double norm = std::sqrt(squared_norm);
+
+            items.push_back(
+                {
+                    norm,
+                    block.feature_id,
+                    block.start_frame,
+                    block.used_num,
+                    block.imu_i,
+                    block.imu_j,
+                    block.depth
+                });
+
+            if (std::string(tag) == "PRE" && norm > 10.0)
+            {
+                const double stamp_i =
+                    (block.imu_i >= 0 && block.imu_i <= WINDOW_SIZE)
+                        ? Headers[block.imu_i].stamp.toSec()
+                        : -1.0;
+
+                const double stamp_j =
+                    (block.imu_j >= 0 && block.imu_j <= WINDOW_SIZE)
+                        ? Headers[block.imu_j].stamp.toSec()
+                        : -1.0;
+
+                ROS_INFO(
+                    "[DBG_VIS_BAD] tag=%s t=%.3f "
+                    "id=%d depth=%.4f first_depth=%.4f tri_count=%d start=%d used=%d "
+                    "pair=%d->%d stamp=%.3f->%.3f "
+                    "norm=%.6f "
+                    "pt_i=[%.6f %.6f %.6f] "
+                    "pt_j=[%.6f %.6f %.6f] "
+                    "vel_i=[%.6f %.6f] "
+                    "vel_j=[%.6f %.6f]",
+                    tag,
+                    Headers[WINDOW_SIZE].stamp.toSec(),
+                    block.feature_id,
+                    block.depth,
+                    block.first_depth,
+                    block.triangulate_count,
+                    block.start_frame,
+                    block.used_num,
+                    block.imu_i,
+                    block.imu_j,
+                    stamp_i,
+                    stamp_j,
+                    norm,
+                    block.point_i.x(),
+                    block.point_i.y(),
+                    block.point_i.z(),
+                    block.point_j.x(),
+                    block.point_j.y(),
+                    block.point_j.z(),
+                    block.velocity_i.x(),
+                    block.velocity_i.y(),
+                    block.velocity_j.x(),
+                    block.velocity_j.y());
+            }              
+
+        }
+
+        std::sort(
+            items.begin(),
+            items.end(),
+            [](const VisualResidualItem &a,
+            const VisualResidualItem &b)
+            {
+                return a.norm > b.norm;
+            });
+
+        ROS_INFO(
+            "[DBG_VIS_TOP] tag=%s t=%.3f valid=%lu invalid=%d",
+            tag,
+            Headers[WINDOW_SIZE].stamp.toSec(),
+            items.size(),
+            invalid_num);
+
+        const int top_k = std::min(10, static_cast<int>(items.size()));
+
+        for (int k = 0; k < top_k; k++)
+        {
+            const auto &item = items[k];
+
+            ROS_INFO(
+                "[DBG_VIS_TOP] tag=%s rank=%d "
+                "id=%d norm=%.6f depth=%.4f "
+                "start=%d used=%d pair=%d->%d",
+                tag,
+                k + 1,
+                item.feature_id,
+                item.norm,
+                item.depth,
+                item.start_frame,
+                item.used_num,
+                item.imu_i,
+                item.imu_j);
+        }
+    };
+
+    auto logFeatureVisualResiduals =
+        [&](const char *tag,
+            const std::vector<DebugVisualResidualBlock> &blocks)
+    {
+        struct FeatureStats
+        {
+            int feature_id = -1;
+            int start_frame = -1;
+            int used_num = 0;
+            double depth = -1.0;
+
+            int pair_num = 0;
+            int bad_pair_num = 0;
+
+            double sum_sq = 0.0;
+            double max_norm = 0.0;
+
+            int max_imu_i = -1;
+            int max_imu_j = -1;
+        };
+
+        std::unordered_map<int, FeatureStats> stats_map;
+
+        for (const auto &block : blocks)
+        {
+            const int n = block.cost->num_residuals();
+
+            std::vector<double> residual(n, 0.0);
+
+            std::vector<const double *> const_params;
+            const_params.reserve(block.params.size());
+
+            for (double *p : block.params)
+            {
+                const_params.push_back(p);
+            }
+
+            const bool ok = block.cost->Evaluate(
+                const_params.data(),
+                residual.data(),
+                nullptr);
+
+            if (!ok)
+            {
+                continue;
+            }
+
+            double squared_norm = 0.0;
+            bool finite = true;
+
+            for (double r : residual)
+            {
+                if (!std::isfinite(r))
+                {
+                    finite = false;
+                    break;
+                }
+
+                squared_norm += r * r;
+            }
+
+            if (!finite)
+            {
+                continue;
+            }
+
+            const double norm = std::sqrt(squared_norm);
+
+            auto &s = stats_map[block.feature_id];
+
+            if (s.pair_num == 0)
+            {
+                s.feature_id = block.feature_id;
+                s.start_frame = block.start_frame;
+                s.used_num = block.used_num;
+                s.depth = block.depth;
+            }
+
+            s.pair_num++;
+            s.sum_sq += squared_norm;
+
+            if (norm > 5.0)
+            {
+                s.bad_pair_num++;
+            }
+
+            if (norm > s.max_norm)
+            {
+                s.max_norm = norm;
+                s.max_imu_i = block.imu_i;
+                s.max_imu_j = block.imu_j;
+            }
+        }
+
+        std::vector<FeatureStats> stats;
+        stats.reserve(stats_map.size());
+
+        for (const auto &kv : stats_map)
+        {
+            stats.push_back(kv.second);
+        }
+
+        std::sort(
+            stats.begin(),
+            stats.end(),
+            [](const FeatureStats &a, const FeatureStats &b)
+            {
+                return a.max_norm > b.max_norm;
+            });
+
+        ROS_INFO(
+            "[DBG_FEATURE_VIS] tag=%s t=%.3f feature_num=%lu",
+            tag,
+            Headers[WINDOW_SIZE].stamp.toSec(),
+            stats.size());
+
+        const int top_k = std::min(10, static_cast<int>(stats.size()));
+
+        for (int k = 0; k < top_k; k++)
+        {
+            const auto &s = stats[k];
+
+            const double mean_norm =
+                s.pair_num > 0 ? std::sqrt(s.sum_sq / s.pair_num) : -1.0;
+
+            ROS_INFO(
+                "[DBG_FEATURE_VIS] tag=%s rank=%d "
+                "id=%d start=%d used=%d depth=%.4f "
+                "pairs=%d bad_pairs=%d "
+                "mean_norm=%.6f max_norm=%.6f max_pair=%d->%d",
+                tag,
+                k + 1,
+                s.feature_id,
+                s.start_frame,
+                s.used_num,
+                s.depth,
+                s.pair_num,
+                s.bad_pair_num,
+                mean_norm,
+                s.max_norm,
+                s.max_imu_i,
+                s.max_imu_j);
+        }
+    };
 
     ceres::Solver::Summary summary;
+    
+    double prior_rms = -1.0;
+    double imu_rms = -1.0;
+    double visual_rms = -1.0;
+
+    int prior_block_num = 0;
+    int imu_block_num = 0;
+    int visual_block_num = 0;
+
+    int prior_dim = 0;
+    int imu_dim = 0;
+    int visual_dim = 0;
+
+    computeResidualRms(
+        dbg_prior_blocks,
+        prior_rms,
+        prior_block_num,
+        prior_dim);
+
+    computeResidualRms(
+        dbg_imu_blocks,
+        imu_rms,
+        imu_block_num,
+        imu_dim);
+
+    computeResidualRms(
+        dbg_visual_blocks,
+        visual_rms,
+        visual_block_num,
+        visual_dim);
+
+    ROS_INFO(
+        "[DBG_RES_PRE] t=%.3f "
+        "prior_rms=%.6f prior_blocks=%d prior_dim=%d "
+        "imu_rms=%.6f imu_blocks=%d imu_dim=%d "
+        "visual_rms=%.6f visual_blocks=%d visual_dim=%d",
+        Headers[WINDOW_SIZE].stamp.toSec(),
+        prior_rms,
+        prior_block_num,
+        prior_dim,
+        imu_rms,
+        imu_block_num,
+        imu_dim,
+        visual_rms,
+        visual_block_num,
+        visual_dim);
+    
+    logWorstVisualResiduals("PRE", dbg_visual_blocks);
+
+    logFeatureVisualResiduals("PRE", dbg_visual_blocks);
 
     ceres::Solve(options, &problem, &summary);
+
+    computeResidualRms(
+        dbg_prior_blocks,
+        prior_rms,
+        prior_block_num,
+        prior_dim);
+
+    computeResidualRms(
+        dbg_imu_blocks,
+        imu_rms,
+        imu_block_num,
+        imu_dim);
+
+    computeResidualRms(
+        dbg_visual_blocks,
+        visual_rms,
+        visual_block_num,
+        visual_dim);
+
+    ROS_INFO(
+        "[DBG_RES_POST] t=%.3f "
+        "prior_rms=%.6f prior_blocks=%d prior_dim=%d "
+        "imu_rms=%.6f imu_blocks=%d imu_dim=%d "
+        "visual_rms=%.6f visual_blocks=%d visual_dim=%d",
+        Headers[WINDOW_SIZE].stamp.toSec(),
+        prior_rms,
+        prior_block_num,
+        prior_dim,
+        imu_rms,
+        imu_block_num,
+        imu_dim,
+        visual_rms,
+        visual_block_num,
+        visual_dim);
+    
+    logWorstVisualResiduals("POST", dbg_visual_blocks);
+    logFeatureVisualResiduals("POST", dbg_visual_blocks);
 
     ROS_INFO("ceres brief report: %s",
              summary.BriefReport().c_str());
@@ -755,6 +1333,7 @@ void Estimator::optimization()
      * 10. 把 Ceres 优化后的 double 参数块写回 Estimator 状态
      */
     double2vector();
+   
 
     if (ESTIMATE_TD)
     {
@@ -794,7 +1373,7 @@ void Estimator::optimization()
         addr_shift[reinterpret_cast<long>(para_Feature[i])] =
             para_Feature[i];
     }
-    
+
     if (marginalization_flag == MARGIN_OLD)
     {
         ROS_INFO("start marginalization: MARGIN_OLD");
@@ -1165,36 +1744,83 @@ void Estimator::optimization()
             ROS_INFO("MARGIN_SECOND_NEW: no last marginalization info, skip");
         }
     }
-    
-
-    
-    // ROS_INFO("after optimization: P[%d] = %.3f %.3f %.3f, V = %.3f %.3f %.3f, Ba norm = %.4f, Bg norm = %.4f",
-    //      WINDOW_SIZE,`
+ 
+ 
+    // ROS_INFO("state: t=%.3f, flag=%d, P=%.3f %.3f %.3f, V=%.3f %.3f %.3f, Ba=%.4f %.4f %.4f, Bg=%.4f %.4f %.4f",
+    //      Headers[WINDOW_SIZE].stamp.toSec(),
+    //      marginalization_flag,
     //      Ps[WINDOW_SIZE].x(),
     //      Ps[WINDOW_SIZE].y(),
     //      Ps[WINDOW_SIZE].z(),
     //      Vs[WINDOW_SIZE].x(),
     //      Vs[WINDOW_SIZE].y(),
     //      Vs[WINDOW_SIZE].z(),
-    //      Bas[WINDOW_SIZE].norm(),
-    //      Bgs[WINDOW_SIZE].norm());
-    ROS_INFO("state: t=%.3f, flag=%d, P=%.3f %.3f %.3f, V=%.3f %.3f %.3f, Ba=%.4f %.4f %.4f, Bg=%.4f %.4f %.4f",
-         Headers[WINDOW_SIZE].stamp.toSec(),
-         marginalization_flag,
-         Ps[WINDOW_SIZE].x(),
-         Ps[WINDOW_SIZE].y(),
-         Ps[WINDOW_SIZE].z(),
-         Vs[WINDOW_SIZE].x(),
-         Vs[WINDOW_SIZE].y(),
-         Vs[WINDOW_SIZE].z(),
-         Bas[WINDOW_SIZE].x(),
-         Bas[WINDOW_SIZE].y(),
-         Bas[WINDOW_SIZE].z(),
-         Bgs[WINDOW_SIZE].x(),
-         Bgs[WINDOW_SIZE].y(),
-         Bgs[WINDOW_SIZE].z());
+    //      Bas[WINDOW_SIZE].x(),
+    //      Bas[WINDOW_SIZE].y(),
+    //      Bas[WINDOW_SIZE].z(),
+    //      Bgs[WINDOW_SIZE].x(),
+    //      Bgs[WINDOW_SIZE].y(),
+    //      Bgs[WINDOW_SIZE].z());
+    Eigen::Vector3d ypr = Utility::R2ypr(Rs[WINDOW_SIZE]);
 
+    ROS_INFO(
+        "state t=%.3f "
+        "P=[%.3f %.3f %.3f] "
+        "V=[%.3f %.3f %.3f] "
+        "YPR=[%.3f %.3f %.3f] "
+        "Ba=[%.5f %.5f %.5f] "
+        "Bg=[%.5f %.5f %.5f] "
+        "feature=%d flag=%d",
+        Headers[WINDOW_SIZE].stamp.toSec(),
+        Ps[WINDOW_SIZE].x(),
+        Ps[WINDOW_SIZE].y(),
+        Ps[WINDOW_SIZE].z(),
+        Vs[WINDOW_SIZE].x(),
+        Vs[WINDOW_SIZE].y(),
+        Vs[WINDOW_SIZE].z(),
+        ypr.x(), ypr.y(), ypr.z(),
+        Bas[WINDOW_SIZE].x(),
+        Bas[WINDOW_SIZE].y(),
+        Bas[WINDOW_SIZE].z(),
+        Bgs[WINDOW_SIZE].x(),
+        Bgs[WINDOW_SIZE].y(),
+        Bgs[WINDOW_SIZE].z(),
+        f_manager.getFeatureCount(),
+        marginalization_flag);
 }
+void Estimator::logWindowState(const char *tag)
+{
+    Eigen::Vector3d ypr = Utility::R2ypr(Rs[WINDOW_SIZE]);
+
+    ROS_INFO(
+        "[%s] t=%.3f "
+        "P=[%.6f %.6f %.6f] "
+        "V=[%.6f %.6f %.6f] "
+        "YPR=[%.6f %.6f %.6f] "
+        "Ba=[%.6f %.6f %.6f] "
+        "Bg=[%.6f %.6f %.6f] "
+        "feature=%d flag=%d",
+        tag,
+        Headers[WINDOW_SIZE].stamp.toSec(),
+        Ps[WINDOW_SIZE].x(),
+        Ps[WINDOW_SIZE].y(),
+        Ps[WINDOW_SIZE].z(),
+        Vs[WINDOW_SIZE].x(),
+        Vs[WINDOW_SIZE].y(),
+        Vs[WINDOW_SIZE].z(),
+        ypr.x(),
+        ypr.y(),
+        ypr.z(),
+        Bas[WINDOW_SIZE].x(),
+        Bas[WINDOW_SIZE].y(),
+        Bas[WINDOW_SIZE].z(),
+        Bgs[WINDOW_SIZE].x(),
+        Bgs[WINDOW_SIZE].y(),
+        Bgs[WINDOW_SIZE].z(),
+        f_manager.getFeatureCount(),
+        marginalization_flag);
+}
+
 
 void Estimator::solveOdometry()
 {
@@ -1231,7 +1857,9 @@ void Estimator::slideWindow()
     f_manager.removeFailures();
 
     if (marginalization_flag == MARGIN_OLD)
-    {
+    {   
+        Matrix3d marg_R0 = Rs[0] * ric[0];
+        Vector3d marg_P0 = Ps[0] + Rs[0] * tic[0];
         /*
          * 删除最老帧：
          * [1 ... WINDOW_SIZE] 左移到 [0 ... WINDOW_SIZE - 1]
@@ -1280,7 +1908,14 @@ void Estimator::slideWindow()
                                 Bas[WINDOW_SIZE],
                                 Bgs[WINDOW_SIZE]);
 
-        f_manager.removeBack();
+        Matrix3d new_R0 = Rs[0] * ric[0];
+        Vector3d new_P0 = Ps[0] + Rs[0] * tic[0];
+
+        f_manager.removeBackShiftDepth(
+            marg_R0,
+            marg_P0,
+            new_R0,
+            new_P0);
 
         /*
          * all_image_frame 同步删除最老图像帧。

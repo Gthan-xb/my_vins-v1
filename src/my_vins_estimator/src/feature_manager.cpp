@@ -327,6 +327,25 @@ void FeatureManager::triangulate(Eigen::Vector3d Ps[],
         
         it_per_id.estimated_depth = depth;
 
+        it_per_id.dbg_triangulate_count++;
+
+        if (it_per_id.dbg_first_depth < 0.0)
+        {
+            it_per_id.dbg_first_depth = depth;
+        }
+
+        it_per_id.dbg_last_triangulate_frame = imu_i;
+
+        ROS_INFO(
+            "[DBG_TRIANGULATE] id=%d start=%d used=%d "
+            "depth=%.4f first_depth=%.4f tri_count=%d",
+            it_per_id.feature_id,
+            it_per_id.start_frame,
+            it_per_id.used_num,
+            depth,
+            it_per_id.dbg_first_depth,
+            it_per_id.dbg_triangulate_count);
+
     }
 }
 
@@ -341,6 +360,102 @@ void FeatureManager::removeFailures()
         if (it->solve_flag == 2)
         {
             feature.erase(it);
+        }
+    }
+}
+
+void FeatureManager::removeBackShiftDepth(
+    const Eigen::Matrix3d &marg_R,
+    const Eigen::Vector3d &marg_P,
+    const Eigen::Matrix3d &new_R,
+    const Eigen::Vector3d &new_P)
+{
+    for (auto it = feature.begin(), it_next = feature.begin();
+         it != feature.end();
+         it = it_next)
+    {
+        it_next++;
+
+        /*
+         * 该特征不是从旧第 0 帧开始观测：
+         * 所有帧编号左移即可。
+         */
+        if (it->start_frame != 0)
+        {
+            it->start_frame--;
+            continue;
+        }
+
+        /*
+         * 该特征原本锚定在旧第 0 帧。
+         * 删除它在旧第 0 帧的观测前，先保存归一化坐标。
+         */
+        if (it->feature_per_frame.empty())
+        {
+            feature.erase(it);
+            continue;
+        }
+
+        const Eigen::Vector3d uv_i =
+            it->feature_per_frame.front().point;
+
+        /*
+         * 删除旧第 0 帧的观测。
+         */
+        it->feature_per_frame.erase(
+            it->feature_per_frame.begin());
+
+        /*
+         * 少于两帧观测时，无法继续为后端提供有效三角化/重投影约束。
+         */
+        if (it->feature_per_frame.size() < 2)
+        {
+            feature.erase(it);
+            continue;
+        }
+
+        /*
+         * 原 inverse depth 对应的是旧 anchor frame：
+         *
+         * P_c_old = uv_i * depth_old
+         *
+         * 其中 estimated_depth 存的是深度 depth，不是 inverse depth。
+         */
+        double depth_old = it->estimated_depth;
+
+        if (!std::isfinite(depth_old) || depth_old < 0.1)
+        {
+            depth_old = INIT_DEPTH;
+        }
+
+        const Eigen::Vector3d pts_i =
+            uv_i * depth_old;
+
+        /*
+         * 旧相机坐标系 -> 世界坐标系。
+         */
+        const Eigen::Vector3d world_pts =
+            marg_R * pts_i + marg_P;
+
+        /*
+         * 世界坐标系 -> 新第 0 帧相机坐标系。
+         */
+        const Eigen::Vector3d pts_j =
+            new_R.transpose() * (world_pts - new_P);
+
+        const double depth_new = pts_j.z();
+
+        /*
+         * 新 anchor 下的深度必须为正。
+         * 否则不信任旧深度，回退到初始化深度。
+         */
+        if (std::isfinite(depth_new) && depth_new > 0.1)
+        {
+            it->estimated_depth = depth_new;
+        }
+        else
+        {
+            it->estimated_depth = INIT_DEPTH;
         }
     }
 }

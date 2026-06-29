@@ -39,7 +39,8 @@ public:
     void solveOdometry();
     void optimization();    
     void slideWindow();
-
+    void logWindowState(const char *tag);
+    
     bool failureDetection();
     bool initialStructure();
     bool visualInitialAlign();
@@ -68,6 +69,11 @@ public:
     Eigen::Vector3d Bgs[WINDOW_SIZE + 1];
     Eigen::Matrix3d last_R;
     Eigen::Vector3d last_P;
+
+    Eigen::Vector3d dbg_last_post_opt_P;
+    Eigen::Vector3d dbg_last_post_opt_V;
+    Eigen::Vector3d dbg_last_post_opt_ypr;
+    bool dbg_has_last_post_opt = false;
 
     // =========================
     // 外参，第一版固定

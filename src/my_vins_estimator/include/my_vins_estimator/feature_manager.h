@@ -48,7 +48,10 @@ public:
        start_frame(_start_frame),
        used_num(0),
        estimated_depth(-1.0),
-       solve_flag(0)
+       solve_flag(0),
+       dbg_first_depth(-1.0),
+       dbg_triangulate_count(0),
+       dbg_last_triangulate_frame(-1)
     {
     }
 
@@ -63,6 +66,10 @@ public:
     int used_num;
     double estimated_depth;
     int solve_flag; // 0: not solve, 1: solve, 2: solve fail
+
+    double dbg_first_depth;
+    int dbg_triangulate_count;
+    int dbg_last_triangulate_frame;
 };
 
 class FeatureManager
@@ -94,6 +101,11 @@ class FeatureManager
         
         void triangulate(Eigen::Vector3d Ps[] ,Eigen::Vector3d tic[], Eigen::Matrix3d ric[]);
         
+        void removeBackShiftDepth(const Eigen::Matrix3d &marg_R,
+                                const Eigen::Vector3d &marg_P,
+                                const Eigen::Matrix3d &new_R,
+                                const Eigen::Vector3d &new_P);
+
         void removeFailures();
 
         void removeBack();
